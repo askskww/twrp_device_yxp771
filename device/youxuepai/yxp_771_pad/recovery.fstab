@@ -1,0 +1,100 @@
+#
+# recovery.fstab — TWRP 专用
+#
+# ⚠️ 路径来源（2026-11-15 实机验证，非推测）：
+#   /vendor/etc/fstab.mt6771 与 fstab.mt8788 中所有 emmc 分区均写作
+#       /dev/block/by-name/<name>
+#   实机确认 /dev/block/ 下**没有** platform/bootdevice 子目录，
+#   只有 sdcN 裸设备节点。by-name 由 ueventd 在 first-stage 建立。
+#
+# 格式：<mount_point>  <fs_type>  <device>  <flags>
+#
+
+# ---- 动态分区的逻辑分区（super 内部，只读）----
+# ⚠️ 本机是 A-only（无 slot 后缀），绝对不能加 slotselect 标志，
+#    否则 TWRP 会去找 system_a / vendor_a 并挂载失败。
+# TWRP 通过 fs_mgr 读取 super 元数据后映射为 /dev/block/mapper/*，
+# logical 标志告诉 TWRP 走 dm 映射而不是直接打开块设备。
+/system_root    ext4    /dev/block/by-name/system     flags=display="System";logical
+/vendor         ext4    /dev/block/by-name/vendor     flags=display="Vendor";logical
+/product        ext4    /dev/block/by-name/product    flags=display="Product";logical
+
+# ---- 可写 ext4 分区 ----
+/data           ext4    /dev/block/by-name/userdata   flags=display="Data";wipeingui;wipedefault
+/cache          ext4    /dev/block/by-name/cache      flags=display="Cache";wipeingui
+/metadata       ext4    /dev/block/by-name/md_udc     flags=display="Metadata";wipeingui
+
+# ---- 启动镜像（TWRP 可备份/刷入 img）----
+/boot           emmc    /dev/block/by-name/boot           flags=display="Boot";backup=1
+/recovery       emmc    /dev/block/by-name/recovery       flags=display="Recovery";backup=1;flashimg=1
+# ⚠️ vendor_boot 情况特殊：
+#   scatter.txt 里有此分区（0x22700000, 64MB），
+#   但 /vendor/etc/fstab.mt6771 里**没有**列出它 —— 说明系统启动不用它。
+#   加 removable 标志：分区不存在时 TWRP 跳过而不报错。
+/vendor_boot    emmc    /dev/block/by-name/vendor_boot    flags=display="Vendor Boot";backup=1;removable
+/dtbo           emmc    /dev/block/by-name/dtbo           flags=display="DTBO";backup=1
+# ⚠️ odmdtbo 已删除：vendor fstab 有引用，但 scatter.txt 中**不存在**独立分区。
+#    dtbo（0x26F00000 → 0x27700000，8MB）已占满该区间，没有给 odmdtbo 留位置。
+#    这很可能是 fstab 模板遗留项（MTK 通用模板不区分机型的产物）。
+# /odmdtbo      emmc    /dev/block/by-name/odmdtbo        flags=display="ODM DTBO";backup=1;flashimg=1
+/logo           emmc    /dev/block/by-name/logo           flags=display="Logo";backup=1
+
+# ---- 关键固件 / 校验相关（备份务必包括）----
+/lk             emmc    /dev/block/by-name/lk             flags=display="LK";backup=1
+/lk2            emmc    /dev/block/by-name/lk2            flags=display="LK2";backup=1
+/seccfg         emmc    /dev/block/by-name/seccfg         flags=display="SecCFG";backup=1
+/para           emmc    /dev/block/by-name/para           flags=display="Para(misc)";backup=1
+/boot_para      emmc    /dev/block/by-name/boot_para      flags=display="BootPara";backup=1
+/proinfo        emmc    /dev/block/by-name/proinfo        flags=display="ProInfo";backup=1
+/frp            emmc    /dev/block/by-name/frp            flags=display="FRP/Persistent";backup=1
+/nvram          emmc    /dev/block/by-name/nvram          flags=display="NVRAM";backup=1
+/nvdata         emmc    /dev/block/by-name/nvdata         flags=display="NVDATA";backup=1
+/nvcfg          emmc    /dev/block/by-name/nvcfg          flags=display="NVCFG";backup=1
+/protect1       emmc    /dev/block/by-name/protect1       flags=display="Protect1";backup=1
+/protect2       emmc    /dev/block/by-name/protect2       flags=display="Protect2";backup=1
+# ⚠️ otp 已删除：scatter.txt 里 otp 的偏移是 0xFFFF01D8 / 0xFFFF0076，
+#    属于 MTK scatter 的"虚拟分区"标记（0xFFFF 开头），不是真实 eMMC 分区。
+# /otp          emmc    /dev/block/by-name/otp            flags=display="OTP";backup=1;flashimg=1
+/vbmeta         emmc    /dev/block/by-name/vbmeta         flags=display="VBMeta";backup=1
+/vbmeta_system  emmc    /dev/block/by-name/vbmeta_system  flags=display="VBMeta System";backup=1
+/vbmeta_vendor  emmc    /dev/block/by-name/vbmeta_vendor  flags=display="VBMeta Vendor";backup=1
+
+# ---- DSP / 协处理器固件 ----
+/md1img         emmc    /dev/block/by-name/md1img         flags=display="MD1IMG(Modem)";backup=1
+# ⚠️ md1dsp / md1arm7 / md3img 已删除：
+#    vendor fstab 里有这三个名字，但 scatter.txt 中**不存在**对应分区。
+#    scatter 里 md1img(0x10500000) 到 spmfw(0x16900000) 之间隔了 100MB，
+#    这三个大概率是 md1img 内部按 offset 切出来的子区域（MTK 常见做法），
+#    不是独立 eMMC 分区，因此 by-name 节点不会存在。
+# /md1dsp       emmc    /dev/block/by-name/md1dsp         flags=display="MD1DSP";backup=1;flashimg=1
+# /md1arm7      emmc    /dev/block/by-name/md1arm7        flags=display="MD1ARM7";backup=1;flashimg=1
+# /md3img       emmc    /dev/block/by-name/md3img         flags=display="MD3IMG";backup=1;flashimg=1
+/spmfw          emmc    /dev/block/by-name/spmfw          flags=display="SPMFW";backup=1
+/scp1           emmc    /dev/block/by-name/scp1           flags=display="SCP1";backup=1
+/scp2           emmc    /dev/block/by-name/scp2           flags=display="SCP2";backup=1
+/sspm_1         emmc    /dev/block/by-name/sspm_1         flags=display="SSPM1";backup=1
+/sspm_2         emmc    /dev/block/by-name/sspm_2         flags=display="SSPM2";backup=1
+/gz1            emmc    /dev/block/by-name/gz1            flags=display="GZ1";backup=1
+/gz2            emmc    /dev/block/by-name/gz2            flags=display="GZ2";backup=1
+/tee1           emmc    /dev/block/by-name/tee1           flags=display="TEE1";backup=1
+/tee2           emmc    /dev/block/by-name/tee2           flags=display="TEE2";backup=1
+/expdb          emmc    /dev/block/by-name/expdb          flags=display="EXPdb";backup=1
+
+# ---- 摄像头 ----
+/cam_vpu1       emmc    /dev/block/by-name/cam_vpu1       flags=display="CAM_VPU1";backup=1
+/cam_vpu2       emmc    /dev/block/by-name/cam_vpu2       flags=display="CAM_VPU2";backup=1
+/cam_vpu3       emmc    /dev/block/by-name/cam_vpu3       flags=display="CAM_VPU3";backup=1
+
+# ---- 外部存储 ----
+# 本机 TF 卡控制器 = 11240000.msdc（见 vendor fstab 第 47 行）
+# 节点名在 recovery 下通常为 mmcblk1 或 sdcard1，用 removable 容错
+/external_sd    auto    /dev/block/mmcblk1p1    flags=display="MicroSD";storage;wipeingui;removable
+/usb_otg        auto    /dev/block/sda1         flags=display="USB-OTG";storage;wipeingui;removable
+
+# ---- 明确不列入（防误操作）----
+# /preloader  /pgpt  /sgpt  /flashinfo  /super
+# 说明：
+#   1) preloader 写坏 = 硬件级变砖，必须 BROM 救
+#   2) pgpt/sgpt 是分区表本体，写坏 = 全盘丢失
+#   3) flashinfo 是 MTK 下载信息
+#   4) super 是容器，内部逻辑分区已在上面列出

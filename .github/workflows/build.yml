@@ -1,0 +1,320 @@
+name: Build TWRP for YXP771
+
+# ============================================================
+# 用法：
+#   1. Fork 本仓库到你自己的 GitHub 账号
+#   2. 打开 Actions 页 → 左边选 "Build TWRP for YXP771" → Run workflow
+#   3. 默认参数已配好，直接点绿色的 Run workflow
+#   4. 约 60-90 分钟后在 Artifacts 里下载 recovery.img
+#
+# 磁盘预算（Actions 免费 runner 为 4C/16G/72G 可用）：
+#   slimhub 清理后  ≈ +30GB  →  可用约 100GB
+#   repo sync --depth=1  ≈ 20-30GB
+#   out/                 ≈ 40-55GB
+#   总计约 60-85GB，勉强够用。若 OOM 或磁盘爆，见下方 fallback 说明。
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_BRANCH:
+        description: 'TWRP manifest branch（若失败，先查分支是否真实存在）'
+        required: true
+        default: 'twrp-12.1'
+      DEVICE_PATH:
+        description: 'Device tree 在仓库内的路径'
+        required: true
+        default: 'device/youxuepai/yxp_771_pad'
+      DEVICE_NAME:
+        description: '设备名（= TARGET_PRODUCT 后半段）'
+        required: true
+        default: 'yxp_771_pad'
+      MAKEFILE_NAME:
+        description: 'lunch 目标（完整名）'
+        required: true
+        default: 'twrp_yxp_771_pad'
+      BUILD_TARGET:
+        description: '构建目标'
+        required: true
+        default: 'recovery'
+      APPLY_MINUI_PATCH:
+        description: '是否自动打 MTK 三缓冲补丁（1=打 0=不打）'
+        required: true
+        default: '1'
+
+jobs:
+  build:
+    # ubuntu-20.04 已被 GitHub 淘汰，用 latest（当前为 24.04）
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: 打印参数
+        run: |
+          echo "branch        = ${{ github.event.inputs.MANIFEST_BRANCH }}"
+          echo "device path   = ${{ github.event.inputs.DEVICE_PATH }}"
+          echo "device name   = ${{ github.event.inputs.DEVICE_NAME }}"
+          echo "lunch target  = ${{ github.event.inputs.MAKEFILE_NAME }}"
+          echo "build target  = ${{ github.event.inputs.BUILD_TARGET }}"
+          echo "minui patch   = ${{ github.event.inputs.APPLY_MINUI_PATCH }}"
+
+      - name: 检出 device tree
+        uses: actions/checkout@v4
+        with:
+          path: devicetree
+
+      # 释放磁盘：删掉 runner 预装的 .NET / Android SDK / Haskell 等无用组件
+      # 若此步骤失败不影响后续（continue-on-error）
+      - name: 释放磁盘空间
+        continue-on-error: true
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          echo "=== 清理后 ==="
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 \
+            openjdk-11-jdk
+
+      - name: 安装 repo
+        run: |
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          sudo ln -sf ~/bin/repo /usr/bin/repo
+          repo --version || true
+
+      # --depth=1 浅克隆：源码占用从 40-60GB 压到 20-30GB
+      # 若某个仓不支持浅克隆导致失败，去掉 --depth=1 重试（磁盘会紧张）
+      - name: 同步 TWRP 源码
+        run: |
+          mkdir -p workspace
+          cd workspace
+          git config --global user.name "gha"
+          git config --global user.email "gha@example.com"
+          repo init --depth=1 --no-tags --no-clone-bundle \
+            -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
+            -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+          repo sync -j4 --force-sync --no-clone-bundle --no-tags
+          echo "=== sync 后磁盘 ==="
+          df -h /
+          du -sh .repo 2>/dev/null || true
+
+      - name: 放入 device tree
+        run: |
+          mkdir -p workspace/${{ github.event.inputs.DEVICE_PATH }}
+          cp -a devicetree/. workspace/${{ github.event.inputs.DEVICE_PATH }}/
+          # .github 与 patches 不属于 device tree，移走
+          rm -rf workspace/${{ github.event.inputs.DEVICE_PATH }}/.github
+          mv workspace/${{ github.event.inputs.DEVICE_PATH }}/patches /tmp/patches 2>/dev/null || true
+          rm -f workspace/${{ github.event.inputs.DEVICE_PATH }}/README.md
+          echo "=== device tree 内容 ==="
+          find workspace/${{ github.event.inputs.DEVICE_PATH }} -maxdepth 3 -type f | head -40
+
+      # 三缓冲补丁：替换 minui/graphics_fbdev.cpp
+      - name: 应用 MTK 三缓冲补丁
+        if: ${{ github.event.inputs.APPLY_MINUI_PATCH == '1' }}
+        run: |
+          SRC=/tmp/patches/minui/graphics_fbdev.cpp
+          DST=workspace/bootable/recovery/minui/graphics_fbdev.cpp
+          if [ ! -f "$SRC" ]; then
+            echo "::warning::补丁文件不存在，跳过（/tmp/patches/minui/graphics_fbdev.cpp）"
+            exit 0
+          fi
+          if [ ! -f "$DST" ]; then
+            echo "::error::目标文件不存在: $DST"
+            exit 1
+          fi
+          echo "=== 原始 Flip/SetDisplayed 相关行 ==="
+          grep -n "yres_virtual\|double_buffered\|Flip()" "$DST" | head -20 || true
+          cp "$DST" /tmp/graphics_fbdev.cpp.orig
+          cp "$SRC" "$DST"
+          echo "✅ 已替换 graphics_fbdev.cpp"
+          echo "=== 替换后确认 ==="
+          grep -n "slot_count\|slot_bytes" "$DST" | head -10
+
+      - name: 设置 swap（16GB 内存防 OOM）
+        continue-on-error: true
+        run: |
+          sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h /
+
+      - name: 编译前安全检查（防超 32MB 分区）
+        run: |
+          set -e
+          DT=workspace/${{ github.event.inputs.DEVICE_PATH }}
+          echo "=== 检查 1: kernel 必须是压缩的 Image.gz ==="
+          if grep -q 'TARGET_PREBUILT_KERNEL.*prebuilt/Image$' "$DT/BoardConfig.mk"; then
+            echo "::error::TARGET_PREBUILT_KERNEL 指向未压缩的 Image（28.52MB），会导致 recovery.img 超过 32MB 分区！"
+            exit 1
+          fi
+          if [ -f "$DT/prebuilt/Image.gz" ]; then
+            KSZ=$(stat -c%s "$DT/prebuilt/Image.gz")
+            KMB=$((KSZ / 1048576))
+            KREST=$(( (KSZ % 1048576) * 100 / 1048576 ))
+            echo "  Image.gz = $KSZ 字节 (${KMB}.${KREST} MB)"
+            if [ "$KSZ" -gt 20000000 ]; then
+              echo "::error::Image.gz 超过 20MB，分区装不下 ramdisk"
+              exit 1
+            fi
+          else
+            echo "::error::prebuilt/Image.gz 不存在"
+            exit 1
+          fi
+          echo "=== 检查 2: recovery 分区大小 ==="
+          grep 'BOARD_RECOVERYIMAGE_PARTITION_SIZE' "$DT/BoardConfig.mk" || true
+          echo "=== 检查 3: 确认未误用 A/B ==="
+          if grep -q 'AB_OTA_UPDATER := true' "$DT/BoardConfig.mk"; then
+            echo "::error::本机是 A-only，AB_OTA_UPDATER 必须为 false"
+            exit 1
+          fi
+          echo "✅ 编译前安全检查通过"
+
+      - name: 编译
+        run: |
+          cd workspace
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export LC_ALL=C
+          export USE_CCACHE=0
+          export JACK_SERVER_VM_ARGUMENTS="-Dfile.encoding=UTF-8 -XX:+TieredCompilation"
+          lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
+          # 注意：全量编译不要 make clean（会删掉刚同步的 out 缓存，白等一小时）
+          make ${{ github.event.inputs.BUILD_TARGET }}image -j4 2>&1 | tee build.log
+          echo "=== 编译后磁盘 ==="
+          df -h /
+
+      - name: 显示编译日志尾部
+        if: always()
+        run: tail -n 120 workspace/build.log || true
+
+      - name: 查找产物
+        if: always()
+        run: |
+          echo "=== 搜索所有 recovery*.img ==="
+          find workspace/out -name "recovery*.img" -o -name "boot.img" 2>/dev/null | head -20 || true
+          echo "=== out/target/product 目录 ==="
+          ls -la workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ 2>/dev/null | head -30 || echo "目录不存在"
+
+      - name: 🔴 产物大小强制校验（超 32MB 直接失败）
+        if: always()
+        run: |
+          set -euo pipefail
+          REC=workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
+          echo "=== 产物校验 ==="
+          if [ ! -f "$REC" ]; then
+            echo "::warning::产物不存在: $REC —— 编译可能失败，请看上方日志"
+            exit 0
+          fi
+          SZ=$(stat -c%s "$REC")
+          MB=$((SZ / 1048576))
+          MBREST=$(( (SZ % 1048576) * 100 / 1048576 ))
+          echo "  产物: $REC"
+          echo "  大小: $SZ 字节 (${MB}.${MBREST} MB)"
+          echo "  分区: 33554432 字节 (32.00 MB)"
+
+          # 1) 分区容量上限（硬红线）
+          if [ "$SZ" -gt 33554432 ]; then
+            echo "::error::产物 $MB MB 超过 32MB 分区上限！绝不能刷入，会导致覆盖后一个分区（para）= 真变砖"
+            exit 1
+          fi
+
+          # 2) 警告线 31MB（留 1MB 余量）
+          if [ "$SZ" -gt 32505856 ]; then
+            echo "::warning::产物 $MB MB 接近 32MB 上限，刷入风险偏高"
+          fi
+
+          # 3) 头部 magic 校验
+          MAGIC=$(head -c 8 "$REC")
+          if [ "$MAGIC" != "ANDROID!" ]; then
+            echo "::error::产物头部不是 ANDROID!（实际: $MAGIC），不是有效 boot/recovery 镜像"
+            exit 1
+          fi
+          echo "  ✅ ANDROID! magic 正确"
+
+          # 4) 解析 kernel/ramdisk 大小，确认 kernel 是压缩的
+          python3 -c "
+          import sys, struct
+          p = sys.argv[1]
+          h = open(p,'rb').read(2048)
+          ks = struct.unpack('<I', h[8:12])[0]
+          rs = struct.unpack('<I', h[12:16])[0]
+          print('  kernel_size  = {:,d} B ({:.2f} MB)'.format(ks, ks/1048576))
+          print('  ramdisk_size = {:,d} B ({:.2f} MB)'.format(rs, rs/1048576))
+          if ks > 20000000:
+              print('::error::kernel {} MB，用的是未压缩 Image！必须换 Image.gz'.format(ks/1048576))
+              sys.exit(1)
+          if rs > 20000000:
+              print('::error::ramdisk {} MB 异常偏大（正常 12-16MB）'.format(rs/1048576))
+              sys.exit(1)
+          print('  OK  kernel 已压缩，ramdisk 大小正常')
+          " "$REC"
+
+          echo "  ✅ 全部校验通过，可以下载刷入"
+
+      - name: 上传镜像
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.BUILD_TARGET }}-img
+          path: |
+            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
+            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.img
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: workspace/build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+# ============================================================
+# 常见失败与对策
+# ============================================================
+# 1) "manifest branch not found"
+#    → 打开 https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp/branches
+#      看真实分支名，改成实际的（可能是 twrp-12.0 / twrp-11 等）
+#
+# 2) "No space left on device"
+#    → 磁盘不够。方案：
+#      a. 去掉 --depth=1（占用更大，不推荐）
+#      b. 在编译步骤前加： rm -rf workspace/.repo  ← 编之前删掉 git 元数据，省 15-25GB
+#         代价是失败后无法重试，但成功率更高
+#
+# 3) "Killed" / OOM
+#    → swap 没生效，或 -j4 太大。把 -j4 改成 -j2
+#
+# 4) "ninja: error: unknown target recoveryimage"
+#    → lunch 目标名不对，确认 twrp_yxp_771_pad.mk 存在且 AndroidProducts.mk 里登记了
+#
+# 5) 编译成功但 recovery.img 找不到
+#    → TWRP 有时输出到 out/target/product/<device>/recovery.img
+#      有时在 out/target/product/<device>/recovery/ 目录
+#      看 "查找产物" 步骤的日志
+#
+# 6) TWRP 能进但画面重复 3 次
+#    → 说明补丁没打或没生效，检查 "应用 MTK 三缓冲补丁" 步骤日志
+# ============================================================

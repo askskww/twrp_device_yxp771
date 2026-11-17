@@ -1,0 +1,122 @@
+# init.recovery.mt8788.rc — MTK 平台 recovery 初始化
+#
+# ⚠️ 文件名依据（2026-11-15 实机验证）：
+#   getprop ro.hardware = mt8788
+#   Android init 加载规则为 init.recovery.${ro.hardware}.rc
+#   ⇒ 必须命名为 init.recovery.mt8788.rc
+#   （叫 mt6771 也能"编进去"，但运行时不会被 init 读取，等于没写）
+#
+# ⚠️ 平台双名说明：
+#   ro.board.platform = mt6771  ← 编译分支名（ALPS alps-mp-s0.mp1）
+#   ro.hardware       = mt8788  ← 运行时硬件名（真实生效的那个）
+#   device/ 下同时保留 init.recovery.mt6771.rc 作为冗余备份，
+#   两者内容一致，谁被读都能工作。
+#
+# ⚠️ 时序说明：
+#   /dev/block/by-name/ 由 ueventd 在 first-stage 建立，
+#   所以任何针对它的操作都必须放在 on fs 之后，不能放 on init。
+
+on early-init
+    # 背光先拉亮，避免黑屏假死（TWRP 起来前先给光）
+    write /sys/class/leds/lcd-backlight/brightness 1024
+
+on init
+    # ---- USB gadget 配置（TWRP 里 adb 工作必需）----
+    mkdir /config 0755 root root
+    mount configfs none /config
+    mkdir /config/usb_gadget/g1 0770 shell shell
+    write /config/usb_gadget/g1/idVendor 0x18d1
+    write /config/usb_gadget/g1/idProduct 0xd001
+    mkdir /config/usb_gadget/g1/strings/0x409 0770 shell shell
+    write /config/usb_gadget/g1/strings/0x409/serialnumber ${ro.serialno}
+    write /config/usb_gadget/g1/strings/0x409/manufacturer ${ro.product.manufacturer}
+    write /config/usb_gadget/g1/strings/0x409/product ${ro.product.model}
+    mkdir /config/usb_gadget/g1/configs/b.1 0777 shell shell
+    mkdir /config/usb_gadget/g1/configs/b.1/strings/0x409 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/ffs.adb 0770 shell shell
+    setprop sys.usb.ffs.aio_compat 1
+
+    # ---- framebuffer 权限 ----
+    chmod 0660 /dev/graphics/fb0
+    chown system graphics /dev/graphics/fb0
+
+on fs
+    # 此阶段 ueventd 已完成，/dev/block/by-name/ 应已存在
+    # ⚠️ symlink 不会递归创建父目录，必须先 mkdir
+    mkdir /dev/block/bootdevice 0755 root root
+    symlink /dev/block/by-name /dev/block/bootdevice/by-name
+
+    mkdir /data 0755 root root
+    mkdir /cache 0755 root root
+    mkdir /metadata 0755 root root
+
+on post-fs
+    chown system system /sys/class/power_supply/battery
+
+on post-fs-data
+    # 触摸事件节点（himax-touchscreen / mtk-tpd）
+    # 设备号运行时探测，这里只做已存在节点的权限兜底
+    chmod 0660 /dev/input/event0
+    chown system input /dev/input/event0
+    chmod 0660 /dev/input/event1
+    chown system input /dev/input/event1
+    chmod 0660 /dev/input/event2
+    chown system input /dev/input/event2
+    chmod 0660 /dev/input/event3
+    chown system input /dev/input/event3
+    chmod 0660 /dev/input/event4
+    chown system input /dev/input/event4
+    chmod 0660 /dev/input/event5
+    chown system input /dev/input/event5
+    chmod 0660 /dev/input/event6
+    chown system input /dev/input/event6
+    chmod 0660 /dev/input/event7
+    chown system input /dev/input/event7
+    chmod 0660 /dev/input/event8
+    chown system input /dev/input/event8
+    chmod 0660 /dev/input/event9
+    chown system input /dev/input/event9
+
+# TWRP 的 adbd 需要这个（ro.debuggable=0 时 TWRP 自己的 adbd 仍然要起）
+on property:sys.usb.config=none
+    stop adbd
+    write /config/usb_gadget/g1/UDC "none"
+
+# UDC 名本机未确认（原参考树写 "musb-hdrc"，那是 UMIDIGI 硬件）
+# 处理方式：先解绑，挂 ffs.adb，UDC 绑定交给 TWRP 自身 usb 服务
+on property:sys.usb.ffs.ready=1
+    write /config/usb_gadget/g1/UDC "none"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "adb"
+    write /config/usb_gadget/g1/idVendor 0x18d1
+    write /config/usb_gadget/g1/idProduct 0xd001
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f1
+
+on boot
+    write /sys/class/leds/lcd-backlight/brightness 1024
+
+# ==================== 排错说明 ====================
+# 1) 进 TWRP 后画面重复 N 次 / 只占 1/3 屏
+#    → 未打 minui 三缓冲补丁，见 patches/minui/graphics_fbdev.cpp
+#
+# 2) adb 连不上
+#    在 TWRP 终端里： ls /sys/class/udc/
+#    拿到真实名字后，在 on boot 段加：
+#        write /config/usb_gadget/g1/UDC "<名字>"
+#    常见值：musb-hdrc / 11200000.usb / mtk-udc / 11201000.usb0
+#
+# 3) 触摸无反应
+#    先在 TWRP 终端跑： getevent -l
+#    若有事件输出 = 驱动正常，是坐标/上报问题
+#    若完全无输出 = 内核未初始化触摸，查 dmesg 里是否有
+#       "tp don't support RECOVERY MODE"  ← 优学派 U50 上出现过该限制
+#    确认方法： grep -a -i "recovery mode" /dev/block/by-name/boot
+#
+# 4) 亮度调节无效
+#    TWRP 终端： cat /sys/class/leds/lcd-backlight/max_brightness
+#    按实际值改 TW_MAX_BRIGHTNESS
+#
+# 5) 未包含 preloader_a / preloader_b symlink
+#    本机 A-only（AB_OTA_UPDATER=false），抄进来会 create_symlink 失败
+# ===================================================
