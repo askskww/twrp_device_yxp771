@@ -9,7 +9,10 @@
 $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 
-$(call inherit-product, $(SRC_TARGET_DIR)/product/embedded.mk)
+# [REMOVED] embedded.mk — 该文件在 android-12.1 中不存在
+# 核实结果：TeamWin/android_build@android-12.1 的 target/product/ 共 103
+# 个文件，没有 embedded.mk（它属于 Android 8/9 时代）。
+# recovery 所需基础配置由 base.mk + vendor/twrp/config/common.mk 提供。
 
 # TWRP 基础（这些在 TWRP manifest 里存在，用 if-exists 防止缺失时报错）
 $(call inherit-product-if-exists, vendor/twrp/config/common.mk)
