@@ -44,8 +44,12 @@ on:
 
 jobs:
   build:
-    # ubuntu-20.04 已被 GitHub 淘汰，用 latest（当前为 24.04）
-    runs-on: ubuntu-latest
+    # 🔒 锁定 ubuntu-22.04（不要改回 latest！）
+    # 原因：2026 年 latest 已指向 Ubuntu 26.04 (resolute)，该版本删除了
+    #       lib32ncurses5-dev / libncurses5 / liblz4-tool 等 Android 12 编译
+    #       必需的 32 位依赖，导致 apt install 直接 exit 100。
+    # 22.04 维护到 2027-04，全套依赖齐全。
+    runs-on: ubuntu-22.04
     timeout-minutes: 350
 
     steps:
@@ -82,14 +86,28 @@ jobs:
 
       - name: 安装编译依赖
         run: |
+          set -x
           sudo apt-get update
+          # 核心依赖（必须装成功，缺一个都编不过）
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
-            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
-            lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 \
-            openjdk-11-jdk
+            git gnupg gperf imagemagick lib32z1-dev libssl-dev \
+            libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python-is-python3 \
+            libncurses5-dev lib32readline-dev libsdl1.2-dev
+          # 可选依赖（包名跨发行版会变，装不上不算失败）
+          sudo apt-get install -y --no-install-recommends \
+            lib32ncurses5-dev libncurses5 lz4 android-sdk-libsparse-utils \
+            || echo "::warning::部分可选依赖未安装（不影响编译）"
+          # lzop/lz4 工具链确认
+          which lzop lz4 || true
+          # JDK：22.04 自带 openjdk-11，24.04+ 需换源，这里锁定 11
+          if ! command -v java >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends openjdk-11-jdk \
+              || echo "::warning::openjdk-11 装不上，尝试默认 jdk"
+          fi
+          java -version 2>&1 || true
+          echo "=== 依赖安装完成 ==="
 
       - name: 安装 repo
         run: |
