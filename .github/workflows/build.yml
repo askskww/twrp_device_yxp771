@@ -206,16 +206,39 @@ jobs:
           echo "=== 替换后确认 ==="
           grep -n "slot_count\|slot_bytes" "$DST" | head -10
 
-      - name: 设置 swap（16GB 内存防 OOM）
-        continue-on-error: true
+      - name: 设置 swap（硬校验，失败则终止）
         run: |
-          sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          set -euo pipefail
+          echo "=== 当前内存与 swap ==="
           free -h
-          df -h /
+          swapon --show || true
 
+          # runner 镜像内 /swapfile 可能已被占用（EBUSY），先关掉
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /swapfile2 2>/dev/null || true
+
+          echo "=== 创建 14GB swap ==="
+          SW=/swapfile2
+          if ! sudo fallocate -l 14G "$SW" 2>/dev/null; then
+            echo "fallocate 失败，改用 dd"
+            sudo dd if=/dev/zero of="$SW" bs=1M count=14336 status=none
+          fi
+          sudo chmod 600 "$SW"
+          sudo mkswap "$SW"
+          sudo swapon "$SW"
+
+          echo "=== 启用后 ==="
+          free -h
+          swapon --show
+
+          SWAP_KB=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
+          echo "SwapTotal = ${SWAP_KB} kB"
+          if [ "${SWAP_KB:-0}" -lt 8000000 ]; then
+            echo "::error::swap 未启用（${SWAP_KB} kB < 8GB），编译必定 OOM"
+            exit 1
+          fi
+          echo "swap OK"
+          df -h /
       - name: 编译前安全检查（防超 32MB 分区）
         run: |
           set -e
@@ -267,7 +290,7 @@ jobs:
           export JACK_SERVER_VM_ARGUMENTS="-Dfile.encoding=UTF-8 -XX:+TieredCompilation"
           lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
           # 注意：全量编译不要 make clean（会删掉刚同步的 out 缓存，白等一小时）
-          make ${{ github.event.inputs.BUILD_TARGET }}image -j4 2>&1 | tee build.log
+          make ${{ github.event.inputs.BUILD_TARGET }}image -j2 2>&1 | tee build.log
           echo "=== 编译后磁盘 ==="
           df -h /
 
