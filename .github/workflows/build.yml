@@ -80,6 +80,13 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL || true
           sudo rm -rf /usr/local/share/boost || true
           sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          # 额外深度清理：腾出 Android 12 编译所需空间
+          sudo rm -rf /usr/local/lib/node_modules || true
+          sudo rm -rf /opt/google/chrome /usr/lib/chromium* || true
+          sudo rm -rf /usr/share/swift /usr/share/miniconda || true
+          sudo rm -rf /var/lib/docker/* 2>/dev/null || true
+          sudo rm -rf /usr/src/* /var/lib/apt/lists/* || true
+          sudo rm -rf /usr/lib/android-sdk /opt/android* || true
           sudo apt-get clean
           echo "=== 清理后 ==="
           df -h /
@@ -206,7 +213,7 @@ jobs:
           echo "=== 替换后确认 ==="
           grep -n "slot_count\|slot_bytes" "$DST" | head -10
 
-      - name: 设置 swap（6GB，分阶段打点，硬校验）
+      - name: 设置 swap（2GB，分阶段打点，硬校验）
         timeout-minutes: 12
         run: |
           set -euo pipefail
@@ -221,16 +228,16 @@ jobs:
           sudo rm -f /swapfile /swapfile2 2>/dev/null || true
 
           SW=/swapfile2
-          SIZE_G=6
+          SIZE_G=2
 
           echo "[SWAP-3] 尝试 fallocate ${SIZE_G}G（快速路径）"
           if sudo fallocate -l ${SIZE_G}G "$SW"; then
             echo "[SWAP-3] fallocate OK"
           else
-            echo "[SWAP-3] fallocate 失败，回退 dd（bs=64M count=96，预计 1-2 分钟）"
+            echo "[SWAP-3] fallocate 失败，回退 dd（bs=64M count=32，预计 30-60 秒）"
             sudo rm -f "$SW"
             sync
-            sudo dd if=/dev/zero of="$SW" bs=64M count=96 status=progress
+            sudo dd if=/dev/zero of="$SW" bs=64M count=32 status=progress
           fi
 
           echo "[SWAP-4] chmod + mkswap"
@@ -247,8 +254,8 @@ jobs:
 
           SWAP_KB=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
           echo "[SWAP-7] SwapTotal = ${SWAP_KB} kB"
-          if [ "${SWAP_KB:-0}" -lt 4194304 ]; then
-            echo "::error::swap 未启用（${SWAP_KB} kB < 4GB），编译必定 OOM"
+          if [ "${SWAP_KB:-0}" -lt 1572864 ]; then
+            echo "::error::swap 未启用（${SWAP_KB} kB < 1.5GB），编译必定 OOM"
             exit 1
           fi
           echo "[SWAP-8] swap OK：$(awk '/^SwapTotal:/{printf "%.1f GB", $2/1048576}' /proc/meminfo)"
@@ -293,6 +300,19 @@ jobs:
             exit 1
           fi
           echo "✅ 编译前安全检查通过"
+
+      - name: 编译前磁盘硬校验
+        run: |
+          set -euo pipefail
+          AVAIL_KB=$(df --output=avail / | tail -1 | tr -d ' ')
+          AVAIL_GB=$((AVAIL_KB / 1048576))
+          echo "=== 编译前剩余磁盘: ${AVAIL_GB} GB (${AVAIL_KB} KB) ==="
+          df -h /
+          if [ "$AVAIL_KB" -lt 15000000 ]; then
+            echo "::error::剩余磁盘不足 15GB（实际 ${AVAIL_GB}GB），编译必失败，请先解决空间"
+            exit 1
+          fi
+          echo "磁盘充足，可以编译"
 
       - name: 编译
         run: |
