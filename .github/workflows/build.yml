@@ -206,38 +206,52 @@ jobs:
           echo "=== 替换后确认 ==="
           grep -n "slot_count\|slot_bytes" "$DST" | head -10
 
-      - name: 设置 swap（硬校验，失败则终止）
+      - name: 设置 swap（6GB，分阶段打点，硬校验）
+        timeout-minutes: 12
         run: |
           set -euo pipefail
-          echo "=== 当前内存与 swap ==="
+
+          echo "[SWAP-1] 当前内存与 swap"
           free -h
           swapon --show || true
+          df -h / /mnt 2>/dev/null || df -h /
 
-          # runner 镜像内 /swapfile 可能已被占用（EBUSY），先关掉
+          echo "[SWAP-2] 清理旧的 swap 文件"
           sudo swapoff -a || true
           sudo rm -f /swapfile /swapfile2 2>/dev/null || true
 
-          echo "=== 创建 14GB swap ==="
           SW=/swapfile2
-          if ! sudo fallocate -l 14G "$SW" 2>/dev/null; then
-            echo "fallocate 失败，改用 dd"
-            sudo dd if=/dev/zero of="$SW" bs=1M count=14336 status=none
+          SIZE_G=6
+
+          echo "[SWAP-3] 尝试 fallocate ${SIZE_G}G（快速路径）"
+          if sudo fallocate -l ${SIZE_G}G "$SW"; then
+            echo "[SWAP-3] fallocate OK"
+          else
+            echo "[SWAP-3] fallocate 失败，回退 dd（bs=64M count=96，预计 1-2 分钟）"
+            sudo rm -f "$SW"
+            sync
+            sudo dd if=/dev/zero of="$SW" bs=64M count=96 status=progress
           fi
+
+          echo "[SWAP-4] chmod + mkswap"
           sudo chmod 600 "$SW"
+          ls -lh "$SW"
           sudo mkswap "$SW"
+
+          echo "[SWAP-5] swapon"
           sudo swapon "$SW"
 
-          echo "=== 启用后 ==="
+          echo "[SWAP-6] 启用后状态"
           free -h
-          swapon --show
+          swapon --show || true
 
           SWAP_KB=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
-          echo "SwapTotal = ${SWAP_KB} kB"
-          if [ "${SWAP_KB:-0}" -lt 8000000 ]; then
-            echo "::error::swap 未启用（${SWAP_KB} kB < 8GB），编译必定 OOM"
+          echo "[SWAP-7] SwapTotal = ${SWAP_KB} kB"
+          if [ "${SWAP_KB:-0}" -lt 4194304 ]; then
+            echo "::error::swap 未启用（${SWAP_KB} kB < 4GB），编译必定 OOM"
             exit 1
           fi
-          echo "swap OK"
+          echo "[SWAP-8] swap OK：$(awk '/^SwapTotal:/{printf "%.1f GB", $2/1048576}' /proc/meminfo)"
           df -h /
       - name: 编译前安全检查（防超 32MB 分区）
         run: |
@@ -290,7 +304,7 @@ jobs:
           export JACK_SERVER_VM_ARGUMENTS="-Dfile.encoding=UTF-8 -XX:+TieredCompilation"
           lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
           # 注意：全量编译不要 make clean（会删掉刚同步的 out 缓存，白等一小时）
-          make ${{ github.event.inputs.BUILD_TARGET }}image -j2 2>&1 | tee build.log
+          make ${{ github.event.inputs.BUILD_TARGET }}image -j1 2>&1 | tee build.log
           echo "=== 编译后磁盘 ==="
           df -h /
 
