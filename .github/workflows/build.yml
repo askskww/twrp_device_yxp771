@@ -222,7 +222,7 @@ jobs:
           echo "=== 替换后确认 ==="
           grep -n "slot_count\|slot_bytes" "$DST" | head -10
 
-      - name: 设置 swap（2GB，分阶段打点，硬校验）
+      - name: 设置 swap（8GB，分阶段打点，硬校验）
         timeout-minutes: 12
         run: |
           set -euo pipefail
@@ -237,16 +237,16 @@ jobs:
           sudo rm -f /swapfile /swapfile2 2>/dev/null || true
 
           SW=/swapfile2
-          SIZE_G=2
+          SIZE_G=8
 
           echo "[SWAP-3] 尝试 fallocate ${SIZE_G}G（快速路径）"
           if sudo fallocate -l ${SIZE_G}G "$SW"; then
             echo "[SWAP-3] fallocate OK"
           else
-            echo "[SWAP-3] fallocate 失败，回退 dd（bs=64M count=32，预计 30-60 秒）"
+            echo "[SWAP-3] fallocate 失败，回退 dd（bs=64M count=128，预计 2-4 分钟）"
             sudo rm -f "$SW"
             sync
-            sudo dd if=/dev/zero of="$SW" bs=64M count=32 status=progress
+            sudo dd if=/dev/zero of="$SW" bs=64M count=128 status=progress
           fi
 
           echo "[SWAP-4] chmod + mkswap"
@@ -257,14 +257,21 @@ jobs:
           echo "[SWAP-5] swapon"
           sudo swapon "$SW"
 
+          # 关键调优：让内核优先使用 swap，避免物理内存吃完后被 OOM 杀
+          echo "[SWAP-5b] 调整内核内存策略"
+          sudo sysctl -w vm.swappiness=90 || true
+          sudo sysctl -w vm.overcommit_memory=1 || true
+          sudo sysctl -w vm.vfs_cache_pressure=200 || true
+          sysctl vm.swappiness vm.overcommit_memory 2>/dev/null || true
+
           echo "[SWAP-6] 启用后状态"
           free -h
           swapon --show || true
 
           SWAP_KB=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
           echo "[SWAP-7] SwapTotal = ${SWAP_KB} kB"
-          if [ "${SWAP_KB:-0}" -lt 1572864 ]; then
-            echo "::error::swap 未启用（${SWAP_KB} kB < 1.5GB），编译必定 OOM"
+          if [ "${SWAP_KB:-0}" -lt 6291456 ]; then
+            echo "::error::swap 未启用（${SWAP_KB} kB < 6GB），编译必定 OOM"
             exit 1
           fi
           echo "[SWAP-8] swap OK：$(awk '/^SwapTotal:/{printf "%.1f GB", $2/1048576}' /proc/meminfo)"
