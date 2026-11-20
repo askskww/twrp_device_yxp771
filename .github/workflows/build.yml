@@ -140,6 +140,15 @@ jobs:
           df -h /
           du -sh .repo 2>/dev/null || true
 
+          # ── 关键：删掉 .repo，腾出 15-25GB ──
+          # 源码已全部检出到工作区，.repo 只是 git 元数据，编译完全不需要
+          # 代价：本次编译失败后无法增量 repo sync，必须重新全量同步
+          echo "=== 删除 .repo（释放大量磁盘）==="
+          du -sh .repo 2>/dev/null || true
+          rm -rf .repo
+          echo "=== 删除后磁盘 ==="
+          df -h /
+
       - name: 放入 device tree
         run: |
           set -euxo pipefail
@@ -308,11 +317,16 @@ jobs:
           AVAIL_GB=$((AVAIL_KB / 1048576))
           echo "=== 编译前剩余磁盘: ${AVAIL_GB} GB (${AVAIL_KB} KB) ==="
           df -h /
-          if [ "$AVAIL_KB" -lt 15000000 ]; then
-            echo "::error::剩余磁盘不足 15GB（实际 ${AVAIL_GB}GB），编译必失败，请先解决空间"
+          echo "--- 各目录占用 top ---"
+          du -sh /usr /opt /var /home 2>/dev/null || true
+          du -sh workspace/.repo workspace/out workspace/frameworks 2>/dev/null || true
+          # 删掉 .repo 后，Android 12 recovery 编译实测需要 18-22GB
+          # 门槛设 18GB：低于此值编译后期铁定 No space left
+          if [ "$AVAIL_KB" -lt 18000000 ]; then
+            echo "::error::剩余磁盘不足 18GB（实际 ${AVAIL_GB}GB），编译必失败"
             exit 1
           fi
-          echo "磁盘充足，可以编译"
+          echo "磁盘充足（${AVAIL_GB}GB >= 18GB），开始编译"
 
       - name: 编译
         run: |
