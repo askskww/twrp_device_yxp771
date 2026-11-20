@@ -207,8 +207,8 @@ jobs:
           SRC=/tmp/patches/minui/graphics_fbdev.cpp
           DST=workspace/bootable/recovery/minui/graphics_fbdev.cpp
           if [ ! -f "$SRC" ]; then
-            echo "::warning::补丁文件不存在，跳过（/tmp/patches/minui/graphics_fbdev.cpp）"
-            exit 0
+            echo "::error::三缓冲补丁文件不存在（/tmp/patches/minui/graphics_fbdev.cpp）—— 屏幕可能黑屏，拒绝继续"
+            exit 1
           fi
           if [ ! -f "$DST" ]; then
             echo "::error::目标文件不存在: $DST"
@@ -335,9 +335,51 @@ jobs:
           fi
           echo "磁盘充足（${AVAIL_GB}GB >= 18GB），开始编译"
 
+      # Android 12 + MTK 动态分区已知冲突：
+      #   build/make/core/Makefile 打包 recovery ramdisk 时执行
+      #     rsync -a --exclude=sdcard ... $(TARGET_ROOT_OUT) $(TARGET_RECOVERY_OUT)
+      #   其中 $(TARGET_ROOT_OUT)/vendor 是 symlink，
+      #   而 $(TARGET_RECOVERY_ROOT_OUT)/vendor 是动态分区产生的非空实体目录，
+      #   rsync 无法用 symlink 覆盖非空目录：
+      #     could not make way for new symlink: root/vendor
+      #     rsync error: ... (code 23)
+      #   → 99% 处 ramdisk_files-timestamp 失败，recovery.img 不产出。
+      # 修法：在 rsync 前删掉 recovery 侧 vendor 目录，让 symlink 正常落地。
+      - name: 修补 build-make recovery rsync 冲突
+        run: |
+          set -euo pipefail
+          MK=workspace/build/make/core/Makefile
+          test -f "$MK" || { echo "::error::找不到 $MK"; exit 1; }
+          cp -f "$MK" /tmp/core_Makefile.orig
+          cat > /tmp/mkpatch.py <<'MKPATCH'
+          import sys
+          p = sys.argv[1]
+          lines = open(p).read().split(chr(10))
+          target = None
+          for i, l in enumerate(lines):
+              if 'rsync -a --exclude=sdcard' in l and 'TARGET_ROOT_OUT' in l:
+                  target = i
+                  break
+          if target is None:
+              print('::error::core/Makefile not found rsync line')
+              sys.exit(1)
+          if any('rm -rf $(TARGET_RECOVERY_ROOT_OUT)/vendor' in x for x in lines):
+              print('SKIP already patched')
+              sys.exit(0)
+          lines.insert(target, chr(9) + 'rm -rf $(TARGET_RECOVERY_ROOT_OUT)/vendor')
+          open(p, 'w').write(chr(10).join(lines))
+          print('PATCHED at line', target + 1)
+          MKPATCH
+          python3 /tmp/mkpatch.py "$MK"
+          echo "=== 补丁后确认 ==="
+          grep -n -B1 -A1 'rm -rf $(TARGET_RECOVERY_ROOT_OUT)/vendor' "$MK"
+          echo "=== diff ==="
+          diff -u /tmp/core_Makefile.orig "$MK" || true
+          echo "OK core/Makefile 补丁完成"
       - name: 编译
         run: |
           cd workspace
+          set -o pipefail
           source build/envsetup.sh
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL=C
@@ -345,9 +387,16 @@ jobs:
           export JACK_SERVER_VM_ARGUMENTS="-Dfile.encoding=UTF-8 -XX:+TieredCompilation"
           lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
           # 注意：全量编译不要 make clean（会删掉刚同步的 out 缓存，白等一小时）
+          # pipefail 已在上面启用：make 失败时整个管道返回非 0，step 会正确变红
           make ${{ github.event.inputs.BUILD_TARGET }}image -j1 2>&1 | tee build.log
+          RC=${PIPESTATUS[0]}
+          echo "=== make 退出码: $RC ==="
           echo "=== 编译后磁盘 ==="
           df -h /
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::make 失败（exit $RC），构建未完成"
+            exit "$RC"
+          fi
 
       - name: 显示编译日志尾部
         if: always()
@@ -368,8 +417,10 @@ jobs:
           REC=workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
           echo "=== 产物校验 ==="
           if [ ! -f "$REC" ]; then
-            echo "::warning::产物不存在: $REC —— 编译可能失败，请看上方日志"
-            exit 0
+            echo "::error::产物不存在: $REC —— 编译失败，未生成镜像"
+            echo "=== 已生成的 img 文件 ==="
+            find workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }} -maxdepth 1 -name '*.img' -exec ls -l {} \; 2>/dev/null || true
+            exit 1
           fi
           SZ=$(stat -c%s "$REC")
           MB=$((SZ / 1048576))
@@ -422,10 +473,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.BUILD_TARGET }}-img
-          path: |
-            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
-            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.img
-          if-no-files-found: warn
+          path: workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
+          if-no-files-found: error
           retention-days: 7
 
       - name: 上传构建日志
@@ -434,7 +483,7 @@ jobs:
         with:
           name: build-log
           path: workspace/build.log
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
 
 # ============================================================
