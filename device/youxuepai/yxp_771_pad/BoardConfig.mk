@@ -98,7 +98,12 @@ BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_CACHEIMAGE_PARTITION_SIZE := 452984832
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_DTBOIMG_PARTITION_SIZE := 8388608          # dtbo 0x26F00000 → tee1 0x27700000
-BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := 67108864 # vendor_boot 0x22700000 → logo 0x26700000
+# 已禁用：本机虽有 vendor_boot 分区，但我们只生成独立 recovery.img，不打包 vendor_boot。
+# Android 12 build/make 一旦看到此变量就会给 recovery packaging 套用 vendor_boot 的
+# rsync 逻辑，试图把 recovery/root/vendor 变成软链接，与动态分区实体目录冲突：
+#   could not make way for new symlink: root/vendor
+#   rsync error: some files/attrs were not transferred (code 23)
+# BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := 67108864 # vendor_boot 0x22700000 → logo 0x26700000
 
 BOARD_USES_METADATA_PARTITION := true
 
