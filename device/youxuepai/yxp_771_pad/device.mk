@@ -25,7 +25,6 @@ PRODUCT_COPY_FILES += \
 #    TWRP 自身的刷写界面已覆盖所有需求。
 #    少一个包 = 少一个编译失败点。
 PRODUCT_PACKAGES += \
-    adb \
     e2fsck \
     mke2fs \
     tune2fs \
@@ -34,6 +33,11 @@ PRODUCT_PACKAGES += \
     toybox \
     sh \
     toolbox
+
+# Android 12 强制校验：host 模块必须放 PRODUCT_HOST_PACKAGES，
+# 不能混在 PRODUCT_PACKAGES 里（否则 main.mk:1330 直接 Build failed）
+PRODUCT_HOST_PACKAGES += \
+    adb
 
 # ===== 属性 =====
 # 注意：ro.hardware / ro.board.platform 这两个属性在 recovery 里由 kernel
