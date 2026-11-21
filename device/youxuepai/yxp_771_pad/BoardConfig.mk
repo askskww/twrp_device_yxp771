@@ -87,7 +87,24 @@ BOARD_MKBOOTIMG_ARGS += --kernel_offset $(BOARD_KERNEL_OFFSET)
 BOARD_MKBOOTIMG_ARGS += --second_offset $(BOARD_SECOND_OFFSET)
 BOARD_MKBOOTIMG_ARGS += --base $(BOARD_KERNEL_BASE)
 BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
-BOARD_MKBOOTIMG_ARGS += --header_version 0
+# 🔴 关键修复（2026-11-21，实机对照原厂 recovery.img 得出）：
+# 原厂 recovery.img header_version = 2，带 dtb(138,531B) + recovery_dtbo(51,239B)。
+# header v0 时 LK 走老路径，完全不会加载 DTB/DTBO，内核拿不到设备树 → pwrap/PMIC/
+# display 全部初始化失败 → 黑屏 → PMIC_cold_reboot（实机上已观测到 4 次）。
+BOARD_MKBOOTIMG_ARGS += --header_version 2
+
+# ===== DTB / DTBO（从原厂 recovery.img 中精确切出）=====
+# dtb.img       : 138,531 B  MD5 2e9e2f5c7c99febe8db8fe800f817ecf  (d00dfeed, ver 17)
+# recovery_dtbo :  51,239 B  MD5 60b68758821d385857919744c2156442  (d7b7ab1e, 32 entry)
+# dtb_addr      : 0x54000000（原厂 header 实测）→ = 0x40078000 + 0x13f88000，与 tags_addr 同址
+BOARD_INCLUDE_DTB_IN_BOOTIMG := true
+BOARD_PREBUILT_DTBIMAGE_DIR := device/youxuepai/yxp_771_pad/prebuilt
+BOARD_DTBIMAGE := $(BOARD_PREBUILT_DTBIMAGE_DIR)/dtb.img
+BOARD_PREBUILT_DTBOIMAGE := $(BOARD_PREBUILT_DTBIMAGE_DIR)/recovery_dtbo
+BOARD_MKBOOTIMG_ARGS += --dtb $(BOARD_DTBIMAGE)
+BOARD_MKBOOTIMG_ARGS += --dtb_offset 0x13f88000
+# DTBO 打进 recovery.img 的 recovery_dtbo 段（header v2 才有该字段）
+BOARD_MKBOOTIMG_ARGS += --recovery_dtbo $(BOARD_PREBUILT_DTBOIMAGE)
 
 # ===== 分区大小（全部来自 scatter.txt 相邻偏移差，非估算）=====
 # 计算方法：size = 下一分区起始偏移 - 本分区起始偏移
