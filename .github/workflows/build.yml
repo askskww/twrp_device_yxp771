@@ -448,22 +448,52 @@ jobs:
           fi
           echo "  ✅ ANDROID! magic 正确"
 
-          # 4) 解析 kernel/ramdisk 大小，确认 kernel 是压缩的
+          # 4) 解析 boot image header（Android bootimg.h，小端布局）
+          #    偏移对照表：
+          #      8  ~ 12  kernel_size
+          #      12 ~ 16  kernel_addr
+          #      16 ~ 20  ramdisk_size
+          #      20 ~ 24  ramdisk_addr
+          #      36 ~ 40  page_size
+          #      40 ~ 44  header_version
+          #      48 ~ 64  name
           python3 -c "
           import sys, struct
           p = sys.argv[1]
           h = open(p,'rb').read(2048)
-          ks = struct.unpack('<I', h[8:12])[0]
-          rs = struct.unpack('<I', h[12:16])[0]
-          print('  kernel_size  = {:,d} B ({:.2f} MB)'.format(ks, ks/1048576))
-          print('  ramdisk_size = {:,d} B ({:.2f} MB)'.format(rs, rs/1048576))
+          u32 = lambda o: struct.unpack('<I', h[o:o+4])[0]
+          ks  = u32(8)
+          ka  = u32(12)
+          rs  = u32(16)
+          ra  = u32(20)
+          ps  = u32(36)
+          hv  = u32(40)
+          print('  kernel_size    = {:,d} B ({:.2f} MB)'.format(ks, ks/1048576))
+          print('  kernel_addr    = 0x{:08X}'.format(ka))
+          print('  ramdisk_size   = {:,d} B ({:.2f} MB)'.format(rs, rs/1048576))
+          print('  ramdisk_addr   = 0x{:08X}'.format(ra))
+          print('  page_size      = {:,d}'.format(ps))
+          print('  header_version = {}'.format(hv))
+          fail = 0
           if ks > 20000000:
               print('::error::kernel {} MB，用的是未压缩 Image！必须换 Image.gz'.format(ks/1048576))
-              sys.exit(1)
+              fail = 1
           if rs > 20000000:
-              print('::error::ramdisk {} MB 异常偏大（正常 12-16MB）'.format(rs/1048576))
+              print('::error::ramdisk {} MB 异常偏大（正常 12-18MB）'.format(rs/1048576))
+              fail = 1
+          if ka != 0x40080000:
+              print('::error::kernel_addr = 0x{:08X}，期望 0x40080000（原厂实测）'.format(ka))
+              fail = 1
+          if ra != 0x55000000:
+              print('::error::ramdisk_addr = 0x{:08X}，期望 0x55000000（原厂实测）'.format(ra))
+              fail = 1
+          if hv != 2:
+              print('::warning::header_version = {}，原厂是 2（带 DTB/DTBO）。若为 0 则 LK 不加载 DTB，recovery 会黑屏'.format(hv))
+          else:
+              print('  OK  header_version = 2，与原厂一致')
+          if fail:
               sys.exit(1)
-          print('  OK  kernel 已压缩，ramdisk 大小正常')
+          print('  OK  kernel 已压缩，ramdisk 大小正常，地址与原厂一致')
           " "$REC"
 
           echo "  ✅ 全部校验通过，可以下载刷入"
